@@ -22,6 +22,7 @@ except ImportError as exc:  # pragma: no cover - environment message
     raise SystemExit("python-docx is required. Install with: pip install python-docx") from exc
 
 from official_docx_engine.models import FormatOperation
+from official_docx_engine.models import DocumentSnapshot, ParagraphSnapshot
 from official_docx_engine.imprint import format_existing_imprint
 from official_docx_engine.page_numbers import apply_page_numbers, inspect_footers
 from official_docx_engine.standard_text import build_standard_text_document, looks_like_standard_text
@@ -45,6 +46,44 @@ SENTENCE_PUNCT_RE = re.compile(r"[。；;！？!?]")
 NUMBERED_ITEM_RE = re.compile(
     r"^([一二三四五六七八九十]+[、，,]|\d+[.．、]|\d+\s|（[一二三四五六七八九十\d]+）|\([一二三四五六七八九十\d]+\)|[a-z]）)"
 )
+GLUED_TITLE_KEYWORD_RE = re.compile(r"(通知|通报|报告|请示|批复|函|纪要|意见|决定|决议|公告|通告|方案|总结|汇报)")
+GLUED_SECTION_HEADINGS = (
+    "存在的问题",
+    "主要问题",
+    "原因分析",
+    "解决措施",
+    "整改措施",
+    "整改情况",
+    "时间计划",
+    "工作计划",
+    "下一步工作",
+    "下一步安排",
+    "基本情况",
+    "总体情况",
+    "有关情况",
+    "处理建议",
+    "工作要求",
+)
+UNNUMBERED_HEADING_SUFFIXES = (
+    "情况",
+    "问题",
+    "措施",
+    "计划",
+    "安排",
+    "要求",
+    "建议",
+    "成效",
+    "背景",
+    "目标",
+    "原则",
+    "范围",
+    "原因",
+    "风险",
+    "结论",
+    "说明",
+)
+SIGNATURE_HINT_RE = re.compile(r"(公司|集团|局|厅|部|委|办|处|科|院|中心|办公室|专班|小组|委员会)$")
+SPACED_SUBHEADING_SUFFIXES = ("规范", "异常", "图片", "方案", "问题", "措施")
 
 
 def _engine_imports():
@@ -105,6 +144,143 @@ def normalize_line(text: str, enabled: bool, space_mode: str) -> str:
     from normalize_text import normalize_text
 
     return normalize_text(text, space_mode=space_mode)
+
+
+def split_glued_single_paragraph(lines: list[str]) -> list[str]:
+    """Conservatively split an extreme one-paragraph official document draft."""
+
+    non_empty = [line.strip() for line in lines if line.strip()]
+    if len(non_empty) != 1:
+        return lines
+    text = non_empty[0]
+    if len(text) < 120 or SENTENCE_PUNCT_RE.search(text[:40]):
+        return lines
+
+    title_match = GLUED_TITLE_KEYWORD_RE.search(text[:80])
+    if not title_match:
+        return lines
+    title = text[: title_match.end()].strip()
+    rest = text[title_match.end() :].strip()
+    if not title or not rest:
+        return lines
+
+    blocks = [title]
+    blocks.extend(_split_glued_body(rest))
+    return blocks if len(blocks) > 2 else lines
+
+
+def _split_glued_body(text: str) -> list[str]:
+    spaced_blocks = _split_spaced_glued_body(text)
+    if spaced_blocks is not None:
+        return spaced_blocks
+
+    heading_positions: list[tuple[int, str]] = []
+    for heading in GLUED_SECTION_HEADINGS:
+        start = 0
+        while True:
+            position = text.find(heading, start)
+            if position == -1:
+                break
+            previous = text[position - 1] if position > 0 else ""
+            if position == 0 or previous in "。；;！？!?":
+                heading_positions.append((position, heading))
+            start = position + len(heading)
+
+    heading_positions = sorted(set(heading_positions))
+    if not heading_positions:
+        return _split_trailing_signature(text)
+
+    blocks: list[str] = []
+    cursor = 0
+    for index, (position, heading) in enumerate(heading_positions):
+        prefix = text[cursor:position].strip()
+        if prefix:
+            blocks.extend(_split_trailing_signature(prefix))
+        blocks.append(heading)
+        content_start = position + len(heading)
+        content_end = heading_positions[index + 1][0] if index + 1 < len(heading_positions) else len(text)
+        content = text[content_start:content_end].strip()
+        if content:
+            blocks.extend(_split_trailing_signature(content))
+        cursor = content_end
+
+    suffix = text[cursor:].strip()
+    if suffix:
+        blocks.extend(_split_trailing_signature(suffix))
+    return blocks
+
+
+def _split_trailing_signature(text: str) -> list[str]:
+    stripped = text.strip()
+    if not stripped:
+        return []
+    for index in range(len(stripped) - 1, -1, -1):
+        if stripped[index] not in "。；;！？!?":
+            continue
+        tail = stripped[index + 1 :].strip()
+        head = stripped[: index + 1].strip()
+        if head and 2 <= len(tail) <= 40 and not SENTENCE_PUNCT_RE.search(tail) and SIGNATURE_HINT_RE.search(tail):
+            return [head, tail]
+        break
+    return [stripped]
+
+
+def _split_spaced_glued_body(text: str) -> list[str] | None:
+    segments = [segment.strip() for segment in re.split(r"\s+", text) if segment.strip()]
+    main_heading_count = sum(1 for segment in segments if segment in GLUED_SECTION_HEADINGS)
+    short_structure_count = sum(1 for segment in segments if _is_spaced_subheading_candidate(segment))
+    if len(segments) < 6 or main_heading_count < 2 or short_structure_count < 2:
+        return None
+
+    blocks: list[str] = []
+    current_main = ""
+    main_count = 0
+    sub_count = 0
+    for segment in segments:
+        if segment in GLUED_SECTION_HEADINGS:
+            main_count += 1
+            sub_count = 0
+            current_main = segment
+            blocks.append(f"{_cn_number(main_count)}、{segment}")
+            continue
+        if current_main and current_main != "时间计划" and _is_spaced_subheading_candidate(segment):
+            sub_count += 1
+            blocks.append(f"（{_cn_number(sub_count)}）{segment}")
+            continue
+        blocks.extend(_split_trailing_signature(segment))
+    return blocks
+
+
+def _is_spaced_subheading_candidate(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text.strip())
+    if (
+        not compact
+        or len(compact) > 24
+        or SENTENCE_PUNCT_RE.search(compact)
+        or NUMBERED_ITEM_RE.match(compact)
+        or compact in GLUED_SECTION_HEADINGS
+        or SIGNATURE_HINT_RE.search(compact)
+    ):
+        return False
+    return compact.endswith(SPACED_SUBHEADING_SUFFIXES)
+
+
+def repair_glued_snapshot(snapshot: DocumentSnapshot) -> DocumentSnapshot:
+    lines = [paragraph.text for paragraph in snapshot.non_empty_paragraphs]
+    repaired = split_glued_single_paragraph(lines)
+    if repaired == lines:
+        return snapshot
+    paragraphs = tuple(
+        ParagraphSnapshot(
+            index=index,
+            text=text,
+            style_name=snapshot.non_empty_paragraphs[0].style_name,
+            alignment=snapshot.non_empty_paragraphs[0].alignment,
+            runs=snapshot.non_empty_paragraphs[0].runs if index == 0 else (),
+        )
+        for index, text in enumerate(repaired)
+    )
+    return DocumentSnapshot(path=snapshot.path, paragraphs=paragraphs, table_count=snapshot.table_count)
 
 
 def build_skeleton_body(doc_type: str) -> list[str]:
@@ -282,6 +458,23 @@ def looks_like_inline_body(text: str) -> bool:
     return len(stripped) > 34
 
 
+def unnumbered_heading_key(text: str) -> Optional[str]:
+    stripped = text.strip()
+    compact = re.sub(r"\s+", "", stripped)
+    if (
+        not compact
+        or len(compact) > 24
+        or SENTENCE_PUNCT_RE.search(stripped)
+        or NUMBERED_ITEM_RE.match(stripped)
+        or CN_DATE_RE.match(compact)
+        or SIGNATURE_HINT_RE.search(compact)
+    ):
+        return None
+    if compact in GLUED_SECTION_HEADINGS or compact.endswith(UNNUMBERED_HEADING_SUFFIXES):
+        return "level1"
+    return None
+
+
 def hierarchy_key(text: str) -> Optional[str]:
     if re.match(r"^[一二三四五六七八九十][、，,]", text):
         return "level1"
@@ -291,7 +484,7 @@ def hierarchy_key(text: str) -> Optional[str]:
         return None if looks_like_inline_body(text) else "body"
     if re.match(r"^(（\d+）|\(\d+\))", text):
         return None if looks_like_inline_body(text) else "body"
-    return None
+    return unnumbered_heading_key(text)
 
 
 def split_source_document(input_path: Path, normalize: bool = True, space_mode: str = "keep_en_boundary") -> Tuple[str, str, list[str], Optional[str], Optional[str]]:
@@ -332,7 +525,7 @@ def recipient_candidate(text: str) -> bool:
     )
 
 
-TITLE_CONTINUATION_RE = re.compile(r"(通知|通报|报告|请示|批复|函|纪要|意见|决定|决议|公告|通告|方案|总结|汇报|说明|手册|标准|规范|办法|指引|流程|审批单|规格说明书)")
+TITLE_CONTINUATION_RE = re.compile(r"(通知|通报|报告|请示|批复|函|纪要|意见|决定|决议|公告|通告|方案|总结|汇报|情况|说明|手册|标准|规范|办法|指引|流程|审批单|规格说明书)")
 PARENTHETICAL_TITLE_RE = re.compile(r"^（[^）]{1,20}）$")
 
 
@@ -456,10 +649,13 @@ def build_document_from_source(
     numbering_formats = load_numbering_formats(input_path)
     paragraph_text_counters: dict[tuple[str, str], int] = {}
     paragraph_texts = [
-        normalize_line(visible_paragraph_text(paragraph, numbering_formats, paragraph_text_counters), normalize, space_mode)
+        visible_paragraph_text(paragraph, numbering_formats, paragraph_text_counters)
         for paragraph in source.paragraphs
         if paragraph.text.strip()
     ]
+    repaired_paragraph_texts = split_glued_single_paragraph(paragraph_texts)
+    glued_repaired = repaired_paragraph_texts != paragraph_texts
+    paragraph_texts = repaired_paragraph_texts
     title_lines, detected_recipient, body_start, detected_issuer, detected_date = split_source_paragraphs(paragraph_texts)
     if generic_formal_text:
         body_start = len(title_lines)
@@ -486,6 +682,14 @@ def build_document_from_source(
                 space_after_pt=12 if index == len(title_lines) - 1 else 0,
             )
     add_recipient(doc, normalize_line(recipient, normalize, space_mode), profile)
+
+    if glued_repaired:
+        for text in paragraph_texts[body_start:]:
+            if detected_issuer and detected_date and text in {detected_issuer, detected_date}:
+                continue
+            add_body_paragraph(doc, normalize_line(text, normalize, space_mode), profile)
+        add_footer(doc, issuer, date_text, profile)
+        return doc, 0
 
     paragraph_ordinal = -1
     copied_tables = 0
@@ -628,7 +832,7 @@ def main() -> int:
             args.format_imprint = False
         else:
             read_docx_snapshot, analyze_structure, diagnose_snapshot, build_format_plan, write_report_json = _engine_imports()
-            snapshot = read_docx_snapshot(input_path)
+            snapshot = repair_glued_snapshot(read_docx_snapshot(input_path))
             if args.page_numbers:
                 footer_inspection = inspect_footers(input_path)
             source_lines = [paragraph.text.strip() for paragraph in snapshot.non_empty_paragraphs]

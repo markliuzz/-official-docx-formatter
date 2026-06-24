@@ -444,6 +444,158 @@ def test_generic_formal_text_flag_formats_without_prompt(tmp_path: Path) -> None
     assert report["doc_type"] == "通用正式文本"
 
 
+def test_glued_single_paragraph_report_is_split_into_reasonable_blocks(tmp_path: Path) -> None:
+    input_path = tmp_path / "glued_report_source.docx"
+    source = Document()
+    paragraph = source.add_paragraph(
+        "闲置及超储专区上架规范自查报告"
+        "为提高闲置专区及超储专区商品信息的规范性和专业性，进一步提升专区上架管理水平，组织开展了自查工作。"
+        "现将自查情况报告如下。"
+        "存在的问题"
+        "经全面排查，闲置及超储专区在架物资的计量单位字段存在大量英文缩写，影响商品信息的统一展示。"
+        "解决措施"
+        "针对英文计量单位问题，计划采取分步整改的方式，将英文缩写统一替换为中文表述。"
+        "时间计划"
+        "按期完成英文单位批量替换申请的提交工作，并完成相关整改复核验收。"
+        "运营专班"
+    )
+    paragraph.alignment = 1
+    source.save(str(input_path))
+
+    output_path = tmp_path / "glued_report_formatted.docx"
+    report_path = output_path.with_suffix(".report.json")
+
+    result = run_format_cli(str(input_path), "-o", str(output_path), "--report")
+
+    assert result.returncode == 0, result.stderr
+    output = Document(str(output_path))
+    texts = [paragraph.text.strip() for paragraph in output.paragraphs if paragraph.text.strip()]
+    assert texts == [
+        "闲置及超储专区上架规范自查报告",
+        "为提高闲置专区及超储专区商品信息的规范性和专业性，进一步提升专区上架管理水平，组织开展了自查工作。现将自查情况报告如下。",
+        "存在的问题",
+        "经全面排查，闲置及超储专区在架物资的计量单位字段存在大量英文缩写，影响商品信息的统一展示。",
+        "解决措施",
+        "针对英文计量单位问题，计划采取分步整改的方式，将英文缩写统一替换为中文表述。",
+        "时间计划",
+        "按期完成英文单位批量替换申请的提交工作，并完成相关整改复核验收。",
+        "运营专班",
+    ]
+    assert output.paragraphs[0].alignment == 1
+    assert output.paragraphs[1].alignment != 1
+    for heading_text in ["存在的问题", "解决措施", "时间计划"]:
+        heading = next(paragraph for paragraph in output.paragraphs if paragraph.text.strip() == heading_text)
+        assert heading.paragraph_format.first_line_indent.pt == 0
+        assert heading.runs[0].font.name == "黑体"
+        assert heading.runs[0].font.bold is True
+
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["doc_type"] == "报告"
+    assert report["structure"]["title_indices"] == [0]
+
+
+def test_unnumbered_headings_and_subtitle_are_structured(tmp_path: Path) -> None:
+    input_path = tmp_path / "unnumbered_headings_source.docx"
+    input_path = make_docx(
+        input_path,
+        [
+            "闲置及超储专区上架规范自查报告",
+            "整改情况说明",
+            "为提高专区上架管理水平，组织开展了自查工作。",
+            "存在的问题",
+            "部分物资缺少商品图片，影响物资的正常展示和采购决策效率。",
+            "解决措施",
+            "已安排专人对接无图片物资的核查工作，并反馈至对应单位补充图片。",
+            "时间计划",
+            "按期完成无图片物资的清单排查、单位对接及图片补充系统更新。",
+            "运营专班",
+        ],
+    )
+    output_path = tmp_path / "unnumbered_headings_formatted.docx"
+
+    result = run_format_cli(str(input_path), "-o", str(output_path), "--report")
+
+    assert result.returncode == 0, result.stderr
+    output = Document(str(output_path))
+    non_empty = [paragraph for paragraph in output.paragraphs if paragraph.text.strip()]
+    assert [paragraph.text.strip() for paragraph in non_empty[:2]] == ["闲置及超储专区上架规范自查报告", "整改情况说明"]
+    assert non_empty[0].alignment == 1
+    assert non_empty[1].alignment == 1
+    assert non_empty[1].runs[0].font.name == "方正小标宋简体"
+    for heading_text in ["存在的问题", "解决措施", "时间计划"]:
+        heading = next(paragraph for paragraph in non_empty if paragraph.text.strip() == heading_text)
+        assert heading.paragraph_format.first_line_indent.pt == 0
+        assert heading.runs[0].font.name == "黑体"
+        assert heading.runs[0].font.bold is True
+    signature = non_empty[-1]
+    assert signature.text.strip() == "运营专班"
+    assert signature.runs[0].font.name == "仿宋_GB2312"
+    assert signature.runs[0].font.bold is False
+
+
+def test_spaced_single_paragraph_report_recovers_nested_hierarchy(tmp_path: Path) -> None:
+    input_path = tmp_path / "spaced_glued_report_source.docx"
+    source = Document()
+    source.add_paragraph(
+        "闲置及超储专区上架规范自查报告 "
+        "为提高闲置专区及超储专区商品信息的规范性和专业性，进一步提升专区上架管理水平，根据集团商品信息管理相关要求，组织开展了闲置及超储专区上架规范自查工作。现将自查情况报告如下。 "
+        "存在的问题 "
+        "计量单位不符合商城商品规范 "
+        "经全面排查，闲置及超储专区在架物资的计量单位字段存在大量英文缩写，各类英文单位不符合商城商品信息规范要求，影响商城信息标准化管理及商品信息的统一展示。 "
+        "上架价格存在异常 "
+        "在自查过程中发现，部分物资的上架价格与框架物资价格对比差异较大。 "
+        "部分物资缺少商品图片 "
+        "商品图片是采购人员对待上架物资规格型号进行直观判断的重要依据。 "
+        "解决措施 "
+        "计量单位不规范问题整改方案 "
+        "针对英文计量单位问题，计划采取分步整改的方式。 "
+        "上架价格异常问题整改方案 "
+        "针对已标记的疑似填错记录，物资管理员将逐一联系对应单位进行价格核实。 "
+        "商品图片缺失问题整改方案 "
+        "已安排专人对接无图片物资的核查工作。 "
+        "时间计划 "
+        "按期完成英文单位批量替换申请的提交工作。 "
+        "后续将定期跟踪整改进度，确保各项整改措施按计划推进落实。 "
+        "运营专班"
+    )
+    source.save(str(input_path))
+    output_path = tmp_path / "spaced_glued_report_formatted.docx"
+
+    result = run_format_cli(str(input_path), "-o", str(output_path), "--report")
+
+    assert result.returncode == 0, result.stderr
+    output = Document(str(output_path))
+    non_empty = [paragraph for paragraph in output.paragraphs if paragraph.text.strip()]
+    texts = [paragraph.text.strip() for paragraph in non_empty]
+    assert texts == [
+        "闲置及超储专区上架规范自查报告",
+        "为提高闲置专区及超储专区商品信息的规范性和专业性，进一步提升专区上架管理水平，根据集团商品信息管理相关要求，组织开展了闲置及超储专区上架规范自查工作。现将自查情况报告如下。",
+        "一、存在的问题",
+        "（一）计量单位不符合商城商品规范",
+        "经全面排查，闲置及超储专区在架物资的计量单位字段存在大量英文缩写，各类英文单位不符合商城商品信息规范要求，影响商城信息标准化管理及商品信息的统一展示。",
+        "（二）上架价格存在异常",
+        "在自查过程中发现，部分物资的上架价格与框架物资价格对比差异较大。",
+        "（三）部分物资缺少商品图片",
+        "商品图片是采购人员对待上架物资规格型号进行直观判断的重要依据。",
+        "二、解决措施",
+        "（一）计量单位不规范问题整改方案",
+        "针对英文计量单位问题，计划采取分步整改的方式。",
+        "（二）上架价格异常问题整改方案",
+        "针对已标记的疑似填错记录，物资管理员将逐一联系对应单位进行价格核实。",
+        "（三）商品图片缺失问题整改方案",
+        "已安排专人对接无图片物资的核查工作。",
+        "三、时间计划",
+        "按期完成英文单位批量替换申请的提交工作。",
+        "后续将定期跟踪整改进度，确保各项整改措施按计划推进落实。",
+        "运营专班",
+    ]
+    level1 = [paragraph for paragraph in non_empty if paragraph.text.strip().startswith(("一、", "二、", "三、"))]
+    level2 = [paragraph for paragraph in non_empty if paragraph.text.strip().startswith(("（一）", "（二）", "（三）"))]
+    assert {paragraph.runs[0].font.name for paragraph in level1} == {"黑体"}
+    assert {paragraph.runs[0].font.name for paragraph in level2} == {"楷体_GB2312"}
+    assert non_empty[-1].runs[0].font.name == "仿宋_GB2312"
+
+
 def test_generic_formal_text_flag_overrides_standard_spec_auto_detection(tmp_path: Path) -> None:
     input_path = tmp_path / "standard_like_without_toc.docx"
     source = Document()

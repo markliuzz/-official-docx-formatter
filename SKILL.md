@@ -23,6 +23,9 @@ Do not modify legacy enterprise-specific skills unless the user explicitly asks.
 - Apply only conservative text normalization: Chinese punctuation, ellipsis/dash, paired quotes, and spacing around Chinese/English/digits.
 - Preserve substantive wording, company names, amounts, contract numbers, project names, facts, and paragraph order.
 - Preserve visible Word automatic numbering. When Word stores visible prefixes such as `一、` in `numbering.xml` instead of paragraph text, materialize those prefixes before rebuilding the document so formatted output does not silently drop hierarchy markers.
+- For extreme glued drafts with only one long paragraph, an obvious official-document title, and embedded section-heading signals, conservatively split title, body paragraphs, section headings, and trailing signature-like lines before classification and formatting.
+- When the source has no explicit numbering but contains short standalone structure lines such as `存在的问题`、`解决措施` or `时间计划`, format those lines as hierarchy headings. Treat short title-continuation lines before the body as subtitles/title lines when signals are clear.
+- When one long paragraph uses spaces to separate structure blocks, preserve those boundaries before text normalization and recover nested hierarchy such as `一、存在的问题` and `（一）计量单位不符合商城商品规范` when the signals are explicit.
 - Protect URLs, email addresses, times, standards, and code-like identifiers during punctuation normalization.
 - Do not perform any redaction/refill cycle and do not desensitize user documents.
 - Do not automatically add missing body text, issuer/signature, or date.
@@ -94,6 +97,9 @@ Do not ask the user to choose between standard and custom formats. If the user a
    - Reuse existing title, recipient, body, attachment notes, issuer, and date when detectable.
    - Do not add placeholder issuer/date if the source document has no clear issuer/date and the user did not provide them.
    - Treat visible automatic numbering as content for preservation purposes. Do not rely on `paragraph.text` alone when reconstructing paragraphs, because Word/WPS may store numbering separately from text.
+   - If the source has collapsed all content into one long paragraph, repair paragraph boundaries only when the title and embedded section-heading signals are clear. Preserve wording and order; do not invent missing headings, issuer, or date.
+   - If paragraph hierarchy is implicit, identify only short standalone, punctuation-free structure lines as headings/subtitles. Do not promote sentence-like body text or signature-like organization lines into headings.
+   - For space-delimited one-paragraph drafts, split structure blocks before applying text normalization so boundary spaces are not lost. Add visible hierarchy numbering only to recovered heading lines, not to sentence-like body paragraphs.
    - Apply the confirmed document type's structural rules and the default configuration's typography, margins, line spacing, paragraph spacing, and hierarchy rules.
    - Normalize punctuation and spacing unless the user explicitly asks to preserve characters exactly. Use `--no-normalize-text` for exact-character preservation.
    - For issuer/date placement, follow the default configuration. It uses no-seal single-issuer placement: one blank line after the body or attachment note, then issuer/date on the right. Read `references/standards.md` before changing this behavior.
