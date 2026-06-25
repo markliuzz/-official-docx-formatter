@@ -86,19 +86,19 @@ SIGNATURE_HINT_RE = re.compile(r"(公司|集团|局|厅|部|委|办|处|科|院|
 SPACED_SUBHEADING_SUFFIXES = ("规范", "异常", "图片", "方案", "问题", "措施")
 MANAGEMENT_METHOD_TITLE = "超储物资内部调剂消耗指引"
 MANAGEMENT_METHOD_CHAPTERS = (
-    ("管理职责分工", "集团供应链管理部"),
-    ("上架信息发布要求", "超储物资上架信息"),
-    ("需求匹配与优先调剂", "需求单位在发起"),
-    ("调剂定价规则", "超储物资的调剂价格"),
-    ("资产减值处理", "资产减值是指"),
-    ("资产评估机制", "资产评估是"),
-    ("重置完全价核定", "重置完全价是指"),
-    ("费用承担", "超储物资调剂产生"),
-    ("零值物资快速调拨", "为提高资源流转效率"),
-    ("线上操作流程", "所有调剂业务必须"),
-    ("财务处理与税务合规", "财务处理与税务合规方面"),
-    ("交付验收与质保", "超储物资调剂适用"),
-    ("考核激励", "考核激励层面"),
+    ("管理职责分工", ("集团供应链管理部",)),
+    ("上架信息发布要求", ("超储物资上架信息", "上架信息须")),
+    ("需求匹配与优先调剂", ("需求单位在发起",)),
+    ("调剂定价规则", ("超储物资的调剂价格",)),
+    ("资产减值处理", ("资产减值是指", "资产减值，定义")),
+    ("资产评估机制", ("资产评估是", "资产评估，定义")),
+    ("重置完全价核定", ("重置完全价是指", "重置完全价，定义")),
+    ("费用承担", ("超储物资调剂产生", "费用主体：超储物资调剂")),
+    ("零值物资快速调拨", ("为提高资源流转效率",)),
+    ("线上操作流程", ("所有调剂业务必须", "线上化闭环")),
+    ("财务处理与税务合规", ("财务处理与税务合规方面", "调出方处理：")),
+    ("交付验收与质保", ("超储物资调剂适用", "现状交付机制")),
+    ("考核激励", ("考核激励层面", "考核激励机制")),
 )
 
 
@@ -194,10 +194,11 @@ def _split_management_method(text: str) -> list[str] | None:
         return None
 
     chapter_points: list[tuple[int, str, str]] = []
-    for title, anchor in MANAGEMENT_METHOD_CHAPTERS:
-        position = compact.find(anchor)
-        if position == -1:
+    for title, anchors in MANAGEMENT_METHOD_CHAPTERS:
+        match = _find_first_anchor(compact, anchors)
+        if match is None:
             return None
+        position, anchor = match
         chapter_points.append((position, title, anchor))
     chapter_points.sort(key=lambda item: item[0])
 
@@ -215,6 +216,13 @@ def _split_management_method(text: str) -> list[str] | None:
         blocks.append(f"{_cn_number(index)}、{title}")
         blocks.extend(_split_sentence_blocks(body))
     return blocks if len(blocks) > 4 else None
+
+
+def _find_first_anchor(text: str, anchors: tuple[str, ...]) -> Optional[tuple[int, str]]:
+    matches = [(position, anchor) for anchor in anchors if (position := text.find(anchor)) != -1]
+    if not matches:
+        return None
+    return min(matches, key=lambda item: item[0])
 
 
 def _split_sentence_blocks(text: str) -> list[str]:
@@ -704,7 +712,7 @@ def build_document_from_source(
     normalize: bool,
     space_mode: str,
     generic_formal_text: bool = False,
-) -> tuple[Document, int]:
+) -> tuple[Document, int, Optional[str]]:
     source = Document(str(input_path))
     numbering_formats = load_numbering_formats(input_path)
     paragraph_text_counters: dict[tuple[str, str], int] = {}
@@ -715,6 +723,9 @@ def build_document_from_source(
     ]
     repaired_paragraph_texts = split_glued_single_paragraph(paragraph_texts)
     glued_repaired = repaired_paragraph_texts != paragraph_texts
+    recovery_method = None
+    if glued_repaired:
+        recovery_method = "management_method" if paragraph_texts[0].startswith(MANAGEMENT_METHOD_TITLE) else "glued_single_paragraph"
     paragraph_texts = repaired_paragraph_texts
     title_lines, detected_recipient, body_start, detected_issuer, detected_date = split_source_paragraphs(paragraph_texts)
     if generic_formal_text:
@@ -749,7 +760,7 @@ def build_document_from_source(
                 continue
             add_body_paragraph(doc, normalize_line(text, normalize, space_mode), profile)
         add_footer(doc, issuer, date_text, profile)
-        return doc, 0
+        return doc, 0, recovery_method
 
     paragraph_ordinal = -1
     copied_tables = 0
@@ -778,7 +789,7 @@ def build_document_from_source(
             source_table_index += 1
 
     add_footer(doc, issuer, date_text, profile)
-    return doc, copied_tables
+    return doc, copied_tables, recovery_method
 
 
 def smoke_check(path: Path) -> str:
@@ -841,6 +852,7 @@ def main() -> int:
     footer_inspection = None
     input_path = None
     inline_table_count = 0
+    chapter_recovery_method = None
 
     if args.create_skeleton:
         if not args.doc_type:
@@ -914,7 +926,7 @@ def main() -> int:
                 doc_type=args.doc_type or "未知",
                 normalize_text=normalize,
             )
-            doc, inline_table_count = build_document_from_source(
+            doc, inline_table_count, chapter_recovery_method = build_document_from_source(
                 input_path,
                 args.title,
                 args.recipient,
@@ -936,6 +948,22 @@ def main() -> int:
                     "operations": list(plan.operations),
                     "FormatOperation": FormatOperation,
                 }
+                if chapter_recovery_method:
+                    report_data["operations"].append(
+                        FormatOperation(
+                            kind="chapter_recovery",
+                            target="paragraph",
+                            params={
+                                "method": chapter_recovery_method,
+                                "chapters": sum(
+                                    1
+                                    for paragraph in doc.paragraphs
+                                    if re.match(r"^[一二三四五六七八九十]+、", paragraph.text.strip())
+                                ),
+                            },
+                            reason="split glued single-paragraph draft into deterministic chapter blocks",
+                        )
+                    )
 
     if args.format_tables and input_path is not None and inline_table_count == 0:
         table_result = append_and_format_source_tables(doc, input_path, profile)

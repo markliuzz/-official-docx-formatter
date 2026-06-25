@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -652,6 +653,44 @@ def test_management_method_single_paragraph_uses_scripted_chapter_recovery(tmp_p
     assert len(level1) == len(expected_chapters)
     assert {paragraph.runs[0].font.name for paragraph in level1} == {"黑体"}
     assert {paragraph.paragraph_format.first_line_indent.pt for paragraph in level1} == {32}
+
+
+def test_management_method_real_single_paragraph_fixture_recovers_structure(tmp_path: Path) -> None:
+    fixture_path = Path("/Users/liuzigeng/Ageng的自媒体/公文写作项目/xiaohongshu/对比图/管理办法.docx")
+    assert fixture_path.exists()
+
+    entry_modes = [
+        ("assume_detected", ["--assume-detected-type"]),
+        ("generic_flag", ["--generic-formal-text"]),
+        ("generic_doc_type", ["--doc-type", "通用正式文本"]),
+    ]
+    expected_fragments = [
+        "超储物资内部调剂消耗指引",
+        "调剂定价规则",
+        "财务处理与税务合规",
+        "考核激励",
+    ]
+
+    for name, extra_args in entry_modes:
+        input_path = tmp_path / f"{name}_source.docx"
+        shutil.copyfile(fixture_path, input_path)
+        output_path = tmp_path / f"{name}_formatted.docx"
+        report_path = output_path.with_suffix(".report.json")
+
+        result = run_format_cli(str(input_path), "-o", str(output_path), "--report", *extra_args)
+
+        assert result.returncode == 0, result.stderr
+        output = Document(str(output_path))
+        texts = [paragraph.text.strip() for paragraph in output.paragraphs if paragraph.text.strip()]
+        assert len(texts) > 10
+        assert texts[0] == "超储物资内部调剂消耗指引"
+        assert all(any(fragment in text for text in texts) for fragment in expected_fragments)
+        assert not (len(texts) == 1 and len(texts[0]) > 1000)
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        recovery_ops = [operation for operation in report["operations"] if operation["kind"] == "chapter_recovery"]
+        assert recovery_ops
+        assert recovery_ops[0]["params"]["method"] == "management_method"
 
 
 def test_generic_formal_text_flag_overrides_standard_spec_auto_detection(tmp_path: Path) -> None:
